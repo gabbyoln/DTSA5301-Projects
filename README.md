@@ -1,1 +1,1 @@
-This includes both final projects for CU Boulder MSDS course DTSA 5301: Data Science as a Field. These projects are designed to showcase the learner's ability to complete steps in the data science process -- from wrangling data to visualizing/analyzing data.   
+This includes both final projects for CU Boulder MSDS course DTSA 5301: Data Science as a Field. These projects are designed to showcase the learner's ability to complete steps in the data science process -- from wrangling data and model development to effectively communicating results.   

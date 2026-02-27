@@ -1,0 +1,316 @@
+---
+title: "COVID Data"
+author: "Gabrielle Olinger"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+<!--
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+-->
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+```
+
+## Motivation
+
+The COVID-19 pandemic, first identified in Wuhan and later declared a global pandemic by the World Health Organization, affected countries in dramatically different ways over time. Data analyses of COVID cases are important in understanding how and why infection spreads. Evaluating global data helps to illustrate not just the impact of COVID but also to compare cases in the context of differing government policies. Some nations implemented strict lockdowns, border closures, and aggressive testing and tracing, while others relied on more relaxed restrictions or prioritized economic continuity. By analyzing COVID-19 case trends over time by country, this project enables comparison of how these differing policy approaches influenced overall outcomes, offering valuable insights for designing more effective responses to future global health crises.
+
+## Importing Data
+
+This data comes from the 2019 Novel Coronavirus Visual Dashboard operated by the Johns Hopkins University Center for Systems Science and Engingeering. Data is aggregated from a range of data sources including the World Health Organization, state-level Departments of Health in the United States, and various international government agencies reporting COVID-19 data worldwide. Data collection began in January 21, 2020 and ended on March 10, 2023.
+
+```{r make_urls}
+url_in = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names <- c("time_series_covid19_confirmed_US.csv",  "time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_US.csv",  "time_series_covid19_deaths_global.csv")
+
+# concatenate
+urls <- str_c(url_in, file_names)
+```
+
+```{r import_data, message=FALSE}
+US_cases_untidy <- read_csv(urls[1])
+global_cases_untidy <- read_csv(urls[2])
+US_deaths_untidy <- read_csv(urls[3])
+global_deaths_untidy <- read_csv(urls[4])
+```
+
+## Tidying Data
+
+I need to pivot the datasets so dates are no longer columns. I will not be using Lat and Long in the analysis, so I will remove these columns. I rename 'Country/Region' and 'Province/State' to be more R friendly, and I change dates to the appropriate format. In order to streamline the analysis, I will merge the cases dataset and the deaths dataset together.
+
+I will tidy global data first:
+
+```{r tidy_global_data, message = FALSE}
+
+# pivot, remove variables not of interest, and reformat date
+global_cases <- global_cases_untidy %>% 
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), names_to = "date", values_to = "cases") %>% 
+  select(-c(Lat,Long)) %>%
+  mutate(date = mdy(date))
+
+# repeat for the deaths dataset
+global_deaths <- global_deaths_untidy %>% 
+  pivot_longer(cols = -c('Province/State', 'Country/Region', Lat, Long), names_to = "date", values_to = "deaths") %>% 
+  select(-c(Lat,Long)) %>%
+  mutate(date = mdy(date))
+
+# merge the datasets 
+global <- global_cases %>%
+          full_join(global_deaths) %>% 
+          rename(Country_Region = 'Country/Region',
+                 Province_State = 'Province/State')
+```
+
+```{r num_countries}
+unique(global$Country_Region)
+```
+
+I want to focus specifically on countries/regions, so I am going to remove rows labeled "Summer Olympics 2020" and "Winter Olympics 2022." Also, Diamond Princess and MS Zaandam are cruise ships.
+
+```{r global_filter}
+regions_to_remove <- c("Summer Olympics 2020", "Winter Olympics 2022", "Diamond Princess", "MS Zaandam")
+global <- global %>%
+  filter(!(Country_Region %in% regions_to_remove))
+```
+
+Now I will tidy US data:
+
+```{r tidy_US_data}
+
+US_cases <- US_cases_untidy %>% 
+    pivot_longer(cols = -(UID:Combined_Key), 
+                 names_to = "date", 
+                 values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+US_deaths <- US_deaths_untidy %>% 
+    pivot_longer(cols = -(UID:Population), 
+                 names_to = "date", 
+                 values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) %>%
+  select(-c(Lat,Long_))
+
+US <- US_cases %>% full_join(US_deaths)
+```
+
+I need to do some tidying so that the US and global data are comparable. First I will add a "Combined Key" column in the global data that combines the Country_Region and Province_State columns. The death dataset for the US included population, so I will also add population to the global data set.
+
+Note that if the Province_State is NA, the Combined_Key is equivalent to Country_Region.
+
+```{r tidy_global_2}
+
+global <- global %>% unite("Combined_Key", 
+                           c(Province_State, Country_Region), 
+                           sep = ",", 
+                           na.rm = TRUE, 
+                           remove = FALSE)
+```
+
+Below I add population data. This comes from the same data repository described above.
+
+```{r global_pops}
+uid_lookup_url = "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/refs/heads/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+uid <- read_csv(uid_lookup_url) %>% select(-c(Lat, Long_, Combined_Key, code3, iso2, iso3, Admin2))
+
+global <- global %>%
+    left_join(uid, by = c("Province_State", "Country_Region")) %>%
+    select(-c(UID, FIPS)) %>%
+    select(Province_State, Country_Region, date, 
+           cases, deaths, Population, Combined_Key)
+```
+
+### Summaries
+
+```{r US_summary}
+summary(US)
+```
+
+```{r global_summary}
+summary(global)
+```
+
+Looks like there are about 8000 instances where the population is NA. Below I look at what areas population data is unavailable.
+
+```{r where_na}
+na_pop <- global %>% filter(is.na(Population)) 
+unique(na_pop$Combined_Key)
+```
+
+For the purposes of this analysis, I am going to remove areas where population data is NA.
+
+```{r remove_na}
+global <- global %>%
+  filter(!is.na(Population))
+```
+
+## Visualization
+
+```{r theme}
+theme_set(theme_minimal())
+```
+
+I first want to look at how the total number of cases in a country compares to that country's population.
+
+```{r global_max}
+global_totals <- global %>% 
+  group_by(Country_Region) %>%
+  summarize(
+    total_cases = max(cases, na.rm = TRUE), 
+    total_deaths = max(deaths, na.rm = TRUE), 
+    Population = max(Population, na.rm = TRUE)
+  )%>%
+  ungroup()
+```
+
+```{r global_viz}
+global_totals %>% ggplot()+
+  geom_point(aes(x = Population, y = total_cases))+
+  scale_y_log10()+
+  scale_x_log10()+
+  labs(y = 'COVID-19 cases', title = 'Total COVID-19 cases by country')
+```
+
+### Analysis
+
+Note that both the x and y axis have log scales. It appears that number of cases and population follows a power law relationship. Though this visualization proves no causality, this makes sense intuitively; the more people in a country, the more people likely to get infected. A small country has a smaller pool of people able to get sick. There's also a few outliers. The most jarring is the one displaying a large population but a low amount cases. Let's see what country this is:
+
+```{r case_outliers}
+global_totals %>% slice_min(total_cases)
+```
+
+This outlier seems to be the result of reporting errors. It appears that North Korea only reported one case, and, even stranger, six deaths. Obviously this is not possible. North Korea's isolationist policies may contribute to errors in reporting.
+
+```{r global_viz_2}
+global_totals %>% 
+  filter(total_deaths>0) %>%
+  ggplot()+
+  geom_point(aes(x = Population, y = total_deaths))+
+  scale_y_log10()+
+  scale_x_log10()+
+  labs(y = 'COVID-19 deaths', title = "Total COVID-19 deaths by country")
+```
+
+### Analysis
+
+This seems to follow a similar power law. This again makes sense intuitively; the greater population, the greater number of cases, and thus the greater number of deaths. Both this visualization and the one above demonstrate a "blob" at the center, indicating that total cases and deaths varied among medium sized countries. This could be due to anything from quarantine policy differences to population density. There appears to be a lot of data points with a low amount of deaths, so I investigate this further below.
+
+```{r death_outliers}
+global_totals %>% slice_min(total_deaths, n = 10)
+```
+
+There are a couple data points that seem dubious. For example, it seems a bit unrealistic that the Marshall Islands had upwards of 15,000 cases but only 17 deaths. This could be the result of inconsistency or errors in reporting.
+
+## Question of Interest
+
+**How does the COVID-19 death rate (no. of deaths divided by no. of cases) vary with population density?**
+
+In order to answer this question, I will need to import supplementary population density data.
+
+This global population density data is provided by World Development Indicators, which is operated by the World Bank Group and is the primary World Bank collection of development indicators, complied from officially recognized international sources. Population density is listed as people per square kilometer of land area. I will be using the mid-year population densities collected in 2022. From the data source: 
+
+> Population is based on the de facto definition of population, which counts all residents regardless of legal status or citizenship--except for refugees not permanently settled in the country of asylum, who are generally considered part of the population of their country of origin. Land area is a country's total area, excluding area under inland water bodies, national claims to continental shelf, and exclusive economic zones. In most cases the definition of inland water bodies includes major rivers and lakes.
+
+```{r global_density_import}
+global_densities_untidy <- read_csv("https://raw.githubusercontent.com/gabbyoln/DTSA5301-Projects/refs/heads/main/data/global_population_density.csv")
+```
+```{r tidy_global_densities}
+# tidying the data
+global_densities <- global_densities_untidy %>%
+  select("Country Name", "2022") %>%
+  rename(Country_Region = 'Country Name', 
+         pop_density = '2022')
+```
+
+```{r}
+# remap some country names so that the two data sets match 
+global_densities <- global_densities %>% 
+  mutate(Country_Region = recode(Country_Region, 
+                                 'Bahamas, The' = 'Bahamas', 
+                                 'Brunei Darussalam' = 'Brunei', 
+                                 'Myanmar' = 'Burma', 
+                                 'Congo, Rep.' = 'Congo (Brazzaville)', 
+                                 'Congo, Dem. Rep.' = 'Congo (Kinshasa)', 
+                                 'Egypt, Arab Rep.' = 'Egypt', 
+                                 'Iran, Islamic Rep.' = 'Iran',
+                                 'Gambia, The' = 'Gambia',
+                                 "Korea, Dem. People's Rep." = "Korea, North", 
+                                 "Korea, Rep." = 'Korea, South', 
+                                 'Kyrgyz Republic' = 'Kyrgyzstan', 
+                                 'Lao PDR' = 'Laos', 
+                                 'Micronesia, Fed. Sts.' = 'Micronesia', 
+                                 'Russian Federation' = 'Russia', 
+                                 'St. Kitts and Nevis' = 'Saint Kitts and Nevis', 
+                                 'St. Lucia' = 'Saint Lucia', 
+                                 'St. Vincent and the Grenadines' = 'Saint Vincent and the Grenadines', 
+                                 'Slovak Republic' = 'Slovakia', 
+                                 'Somalia, Fed. Rep.' = 'Somalia', 
+                                 'Syrian Arab Republic' = 'Syria', 
+                                 'Turkiye' = 'Turkey', 
+                                 'United States' = 'US', 
+                                 'Venezuela, RB' = 'Venezuela', 
+                                 'Viet Nam' = 'Vietnam', 
+                                 'Yemen, Rep.' = 'Yemen'
+                                 ))
+```
+
+I will exclude North Korea for the reasons listed above. I will also exclude Holy See (the Vatican), Taiwan, and Kosovo, because there is no population density data for these areas. 
+
+```{r dens_join}
+global_totals_new <- global_totals %>% 
+  left_join(global_densities, by = 'Country_Region') %>% 
+  filter(!(Country_Region %in% c('Holy See', 'Kosovo', 'Taiwan*', 'Korea, North')
+           ))%>%
+  filter(total_deaths>0)%>%
+  mutate(death_rate = total_deaths/total_cases, 
+         log_pop_dens = log(pop_density), 
+         log_death_rate = log(death_rate))
+```
+
+## Model
+
+I will attempt to model the COVID-19 death rate (total number of deaths divided by total number of cases) across countries as a function of population density. I model the two variables using a relationship of the form $ln(y) = b\cdot ln(x)+a$. This is equivalent to the expression $y = a\cdot x^b$.
+
+```{r model}
+mod <- lm(log_death_rate ~ log_pop_dens, data = global_totals_new)
+summary(mod)
+```
+
+```{r dens_viz}
+global_totals_new %>% 
+  mutate(pred = predict(mod)) %>%
+  ggplot() + 
+  geom_point(aes(x = log_pop_dens, y = log_death_rate))+
+  geom_line(aes(x = log_pop_dens, y = pred),color = 'red')+
+  labs(x = 'log(population density)', y = 'log(death rate)')
+```
+
+```{r}
+median(global_totals_new$death_rate)
+```
+### Analysis
+
+The figure above shows the resulting model: $ln(Death\;Rate) = b\cdot ln(Pop.\,Density)+a$ where $b = 0.15757\pm 0.05223$ and $a = -3.99601\pm 0.24210$. This model has a low R-squared value of 0.046. Additionally, the median death rate is about 0.01. Both the model and the visualization above reveal an interesting, albeit negative, result: that population density is not a good predictor of COVID-19 death rate. What slight relationship the model does show is rather non-intuitive; as population density of a country increases, the death rate decreases slightly. While one may feel that crowded regions would experience the greatest devastation during a pandemic, this result does not support that idea. Certain confounding factors could be explored, such as whether places with greater population densities have better access to high-quality medical care. 
+
+## Bias and Sources of Error
+
+Some countries may have unreliable data, such as North Korea reporting only one case. This reporting bias reflects a broader issue that the reliability of data in certain regions can be compromised by political tensions or international policy. Countries with greater resources and more centralized reporting methods are biased towards reporting higher numbers of cases. In contrast, countries with fewer resources may be subject to reporting bias, where not all cases are recorded. 
+
+There may also be measurement bias. While COVID-19 cases are easier to tally, deaths can be more subjective; for instance, if someone dies of COVID-related pneumonia, is the cause of death listed as COVID or pneumonia? Therefore, when evaluating the extent of COVID across different countries/regions, cases may be a more reliable measure than deaths.
+
+## Conclusion
+
+COVID-19 analyses help us to understand how the infection spread and why, and their findings will impact policies for future pandemics. In this report, I look at COVID-19 data provided from the 2019 Novel Coronavirus Visual Dashboard operated by the Johns Hopkins University Center for Systems Science and Engingeering. This resource aggregates reported and deaths across countries and within the US. I also import supplementary population density data, provided by the World Bank Group. Initial visualizations confirm what one might expect: that the number of COVID cases and deaths increase as a countries population increases. This makes sense intuitively; a country with a higher population has a greater pool of people able to get infected. My analysis is centered on one question: how does the proportion of deaths to cases, or death rate, change with population density? The model and subsequent analysis reveals that it doesn't; the death rate is nearly constant at about 1%. Further investigation is needed in order to determine better predictors of the death rate. The spread and impact of COVID-19 may be determined by other, more complex factors, such as government policies, access to healthcare, and community willingness to adhere to quarantine protocols. 
+
+```{r session}
+sessionInfo()
+```
